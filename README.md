@@ -13,6 +13,14 @@
 - **双邮件头路径对照**：分别粘贴两份头部，复用同一套 Received 解析结果，
   按投递结构顺序对中继节点做**保序全局对齐**，并列展示**共有 / 新增（仅 B）/ 缺失（仅 A）**节点；
   共有节点展示两份各自的相邻耗时与差值（B−A），任一侧时间无效时明确显示“不可比较”。
+- **多封邮件慢段归因**：在页面粘贴**至少三份**以明确分隔符
+  （整行的 `-----`、`=====`、`##### 下一封 #####` 等）分开的原始头部，
+  或调用 `POST /api/batch-delays`（请求体为 headers 字符串数组）。
+  只按各邮件**投递顺序中实际相邻的两个节点**聚合，区段身份为上下游节点
+  “规范化 `by` 主机名 + 对端 IP”的完整已知字段组合，任一端缺少身份的区段不合并；
+  同一封邮件重复出现同键区段（真实环路 / greylisting 重试）时仅取**最大有效非负耗时**
+  作为该邮件样本。结果按区段输出**样本数、中位耗时、最大耗时**并**从慢到快**排序，
+  同时分别列出因**无效时间 / 时间倒灌 / 缺少节点身份**被排除的区段数量。
 
 解析核心（`mailtrace/`）仅依赖 Python 标准库，可脱离 Flask 单独使用或被其他程序导入。
 
@@ -55,7 +63,11 @@ docker build -t mailtrace . && docker run --rm -p 8000:8000 mailtrace
 2. 把邮件的**原始头部**（Gmail 的“显示原始邮件”、Outlook 的“查看邮件来源”等）完整粘贴到
    **头部 A** 文本框（也可以点“填入示例”，会同时填入 A、B 两份示例）；
 3. 点击 **分析投递路径（A）** 查看单份头部的投递时间线；
-4. 或在 **头部 B** 中粘贴另一份头部，点击 **对照 A / B 路径** 查看双邮件头对照结果。
+4. 或在 **头部 B** 中粘贴另一份头部，点击 **对照 A / B 路径** 查看双邮件头对照结果；
+5. 在页面下方 **多封邮件慢段归因** 文本框中，粘贴至少三份用整行分隔符
+   （如 `-----`、`=====`、`##### 下一封 #####`，不含冒号）分开的原始头部，
+   点击 **慢段归因统计**（可先点“填入三份示例”查看含倒灌 / 无身份节点 /
+   重复区段的完整示例）。
 
 单份分析页面以时间线形式展示每个中继节点：节点名称、UTC 时间、from/by/协议、对端 IP、
 距上一节点耗时、异常/告警，以及可展开的**原始 `Received` 文本（保留折行）**。
@@ -84,7 +96,58 @@ curl -s -X POST http://localhost:8000/api/compare \
         "headers_a": "Received: by mx.example; Tue, 23 Sep 2026 10:00:00 +0800",
         "headers_b": "Received: by mx.example; Tue, 23 Sep 2026 10:00:05 +0800"
       }'
+
+# 多封邮件慢段归因（至少两份；headers 为原始头部字符串数组）
+curl -s -X POST http://localhost:8000/api/batch-delays \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "headers": [
+          "Received: by mx.example; Wed, 24 Sep 2026 02:00:10 +0000\nReceived: from edge by mx.example; Wed, 24 Sep 2026 02:00:00 +0000",
+          "Received: by mx.example; Wed, 24 Sep 2026 03:00:30 +0000\nReceived: from edge by mx.example; Wed, 24 Sep 2026 03:00:00 +0000",
+          "Received: by mx.example; Wed, 24 Sep 2026 04:00:05 +0000\nReceived: from edge by mx.example; Wed, 24 Sep 2026 04:00:00 +0000"
+        ]
+      }'
+
+# 也可以直接提交页面粘贴的带分隔符整段文本（由服务端切分）
+curl -s -X POST http://localhost:8000/api/batch-delays \
+  -H 'Content-Type: application/json' \
+  -d '{"headers_text": "Received: ...\n-----\nReceived: ...\n#####\nReceived: ..."}'
 ```
+
+`/api/batch-delays` 少于两份、`headers` 不是字符串数组或全部邮件都无法解析时返回 400。
+成功时主要字段：
+
+```json
+{
+  "valid_email_count": 3,
+  "email_count": 3,
+  "segment_count": 1,
+  "sample_count": 3,
+  "excluded_invalid_time": 0,
+  "excluded_backflow": 0,
+  "excluded_missing_identity": 0,
+  "duplicate_samples_dropped": 0,
+  "segments": [
+    {
+      "from_label": "mx.example (...)",
+      "to_label": "mx.example (...)",
+      "segment_label": "… → …",
+      "sample_count": 3,
+      "samples_seconds": [5.0, 10.0, 30.0],
+      "median_seconds": 10.0,
+      "median_human": "10 秒",
+      "max_seconds": 30.0,
+      "max_human": "30 秒"
+    }
+  ]
+}
+```
+
+`segments` 按中位耗时**从慢到快**排序；`excluded_invalid_time`（本节点或上游
+时间缺失/无法解析，不跨节点拼接）、`excluded_backflow`（时间倒灌，阈值与
+单条分析的时钟偏移告警一致，1 秒）、`excluded_missing_identity`（区段端点
+的 `by` 与对端 IP 全部缺失，无法稳定归并）分别计数；同一封邮件内同键区段
+重复时只保留最大有效非负耗时，被舍弃的次数计入 `duplicate_samples_dropped`。
 
 `/api/compare` 返回 `alignment.rows`（每行 `kind` 为 `common` / `added` / `missing`）
 及 `common_count` / `added_count` / `missing_count` 统计；共有行内含
@@ -106,6 +169,27 @@ curl -s -X POST http://localhost:8000/api/compare \
 因此头部文本里第一条 `Received` 是最后一跳（最靠近收件方），最后一条才是第一跳。
 本工具按这一“嵌套结构”将 `Received` **反转**后呈现，得到真实投递顺序，
 再用时间戳校验该顺序并计算相邻耗时。当解析出的时间出现倒挂（时钟偏差或伪造）时，会明确告警。
+
+---
+
+## 慢段归因原理（多封邮件）
+
+1. 粘贴内容按**整行分隔符**（至少 3 个 `-` `=` `#` `~` `*` `_`，不含冒号；
+   含冒号的行永远视为头部字段，不会误伤）切成多份独立头部，逐份复用
+   单条分析的 Received 解析。
+2. 每份邮件只产生“**投递顺序中实际相邻的两个节点**”的区段样本，
+   不会跳过中间无时间的节点去拼接首尾耗时。
+3. 节点身份沿用双邮件头对照的定义：规范化 `by` 主机名（小写、去尾点）
+   与对端 IP 的**完整已知字段组合** `(by, ip)`；区段键为
+   `((上游 by, 上游 ip), (下游 by, 下游 ip))`，只有两端已知字段组合
+   完全一致的区段才合并。`by` 与 IP 都缺失的节点没有身份，与其相邻的
+   区段只计数排除、不参与合并。
+4. 耗时无效（任一端时间缺失/无法解析）或为**时间倒灌**（下游早于上游，
+   超过 1 秒容差）的区段分别排除并计数。
+5. 同一封邮件内同一区段键重复出现（真实转发环、greylisting 重试）时，
+   只保留其中**最大的有效非负耗时**作为该邮件在这一区段上的唯一样本。
+6. 每个区段汇总样本数、中位耗时、最大耗时，并按中位耗时**从慢到快**排序
+   （并列时最大耗时高者在前）。
 
 ---
 
@@ -172,15 +256,17 @@ python -m unittest discover -s tests -v
 │   └── parsing/
 │       ├── parser.py       # 折行展开、时间解析、路径排序、耗时与异常
 │       ├── compare.py      # 双邮件头对照：保序全局对齐、耗时差值
-│       └── sample.py       # 页面“填入示例”数据（A / B 两份）
+│       ├── batch.py        # 多邮件慢段归因：分隔符切分、相邻区段聚合
+│       └── sample.py       # 页面“填入示例”数据（A / B / 三份批量）
 ├── wsgi.py                 # gunicorn / flask 启动入口
 ├── entrypoint.sh           # 容器启动时安装依赖并启动 gunicorn
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml      # 一键启动，默认端口 8000（HOST_PORT 可改）
 ├── requirements.txt
-└── tests/                  # 解析核心与对照单元测试
+└── tests/                  # 解析核心、对照与批量归因单元测试
     ├── test_parser.py
-    └── test_compare.py
+    ├── test_compare.py
+    └── test_batch.py
 ```
 
 ## 安全与隐私

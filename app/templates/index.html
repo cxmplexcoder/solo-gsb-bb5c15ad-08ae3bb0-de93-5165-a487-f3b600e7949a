@@ -167,6 +167,37 @@
   .diff-ok { color: var(--ok); font-weight: 700; }
   .diff-na { color: var(--muted); }
   .time-bad { color: var(--error); }
+
+  /* 多邮件慢段归因 */
+  .btn-batch { background: #c084fc; color: #2e1065; }
+  table.batch {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden;
+  }
+  table.batch th, table.batch td {
+    padding: 9px 12px; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--line);
+  }
+  table.batch thead th {
+    background: var(--panel-2); color: var(--muted);
+    font-size: 12.5px; white-space: nowrap;
+  }
+  table.batch tbody tr:last-child td { border-bottom: 0; }
+  table.batch td.seg { font-weight: 600; word-break: break-all; }
+  table.batch td.seg .arrow { color: var(--accent); margin: 0 6px; font-weight: 400; }
+  table.batch td.seg .sub { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
+  table.batch td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.batch td.rank { color: var(--muted); width: 44px; }
+  table.batch tbody tr:nth-child(1) td.rank { color: var(--error); font-weight: 700; }
+  .excluded {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 16px; margin: 0 0 16px;
+    font-size: 13px; color: var(--muted);
+  }
+  .excluded b { color: var(--warn); font-weight: 700; }
+  .excluded b.backflow { color: var(--error); }
+  .excluded b.identity { color: #c084fc; }
 </style>
 </head>
 <body>
@@ -174,7 +205,8 @@
   <h1>📮 邮件投递路径检查器</h1>
   <p class="subtitle">
     粘贴邮件原始头部（含 <code>Received</code> 字段），自动展开折行、按实际投递顺序排列中继节点并计算相邻节点耗时。
-    顺序自上而下为：发件方 → 收件方。在 A、B 两侧各粘贴一份头部，可对照两份邮件的投递路径差异。
+    顺序自上而下为：发件方 → 收件方。在 A、B 两侧各粘贴一份头部，可对照两份邮件的投递路径差异；
+    在下方粘贴多份以分隔符分开的头部，可按相邻区段聚合多封邮件的耗时并定位慢段。
   </p>
 
   <form method="post" action="/analyze" id="mainForm">
@@ -190,6 +222,22 @@
       <button class="btn-ghost" type="button" id="fillSample">填入示例</button>
       <button class="btn-ghost" type="button" id="clearInput">清空</button>
       <span class="hint" style="align-self:center;">单侧输入上限 {{ max_input_kb }} KB（MAX_INPUT_KB）</span>
+    </div>
+  </form>
+
+  <form method="post" action="/batch-delays" id="batchForm">
+    <label class="input-label" for="headers_batch">
+      多封邮件慢段归因（粘贴至少两份、推荐三份以上的原始头部，用整行分隔符分开）
+    </label>
+    <textarea name="headers_batch" id="headers_batch" style="min-height:200px;"
+      placeholder="粘贴第 1 封邮件的完整原始头部……&#10;----- 下一封 -----&#10;粘贴第 2 封邮件的完整原始头部……&#10;##### 下一封邮件 #####&#10;粘贴第 3 封邮件的完整原始头部……">{{ headers_batch or '' }}</textarea>
+    <div class="toolbar">
+      <button class="btn-batch" type="submit">慢段归因统计</button>
+      <button class="btn-ghost" type="button" id="fillBatchSample">填入三份示例</button>
+      <button class="btn-ghost" type="button" id="clearBatch">清空</button>
+      <span class="hint" style="align-self:center;">
+        分隔行为整行的 --- / === / ### / ##### 下一封邮件 ##### 等（不含冒号）
+      </span>
     </div>
   </form>
 
@@ -275,6 +323,79 @@
         （任一冲突即视为不同节点，两者都缺失的节点不参与匹配，不会仅凭时间相近配对）。
         耗时为各自路径内到上一相邻节点的耗时；任一侧时间无效时差值显示“不可比较”，
         不会跳过中间节点拼接耗时。
+      </p>
+    {% endif %}
+  {% endif %}
+
+  {% if batch %}
+    {% if batch.error %}
+      <div class="banner">{{ batch.error }}</div>
+    {% else %}
+      <h2 style="font-size:18px;">多邮件慢段归因（共 {{ batch.valid_email_count }} 份邮件）</h2>
+      <div class="stats">
+        <div class="stat"><div class="num">{{ batch.valid_email_count }}/{{ batch.email_count }}</div><div class="label">有效邮件 / 总份数</div></div>
+        <div class="stat"><div class="num">{{ batch.sample_count }}</div><div class="label">有效区段样本</div></div>
+        <div class="stat"><div class="num">{{ batch.segment_count }}</div><div class="label">相邻区段种类</div></div>
+        <div class="stat"><div class="num warn">{{ batch.excluded_invalid_time }}</div><div class="label">排除：无效 / 缺失时间</div></div>
+        <div class="stat"><div class="num error">{{ batch.excluded_backflow }}</div><div class="label">排除：时间倒灌</div></div>
+        <div class="stat"><div class="num" style="color:#c084fc;">{{ batch.excluded_missing_identity }}</div><div class="label">排除：节点缺少身份</div></div>
+      </div>
+
+      {% if batch.errors %}
+      <div class="banner">
+        以下邮件解析失败被跳过：
+        {% for e in batch.errors %}第 {{ e.index + 1 }} 份（{{ e.error }}）{% if not loop.last %}；{% endif %}{% endfor %}
+      </div>
+      {% endif %}
+
+      <div class="excluded">
+        排除合计 <b>{{ batch.excluded_invalid_time }}</b> 个无效时间区段、
+        <b class="backflow">{{ batch.excluded_backflow }}</b> 个时间倒灌区段、
+        <b class="identity">{{ batch.excluded_missing_identity }}</b> 个含无身份节点的区段；
+        {% if batch.duplicate_samples_dropped %}
+          另有 <b>{{ batch.duplicate_samples_dropped }}</b> 个同邮件同键重复区段，
+          已按规则仅保留最大有效非负耗时作为该邮件样本。
+        {% else %}
+          未发现同邮件同键重复区段。
+        {% endif %}
+        统计只按各邮件投递顺序中<strong>实际相邻</strong>的两个节点聚合，不跨节点拼接耗时。
+      </div>
+
+      <div class="cmp-wrap">
+      <table class="batch">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>区段（上游 → 下游，实际相邻）</th>
+            <th style="text-align:right;">样本数</th>
+            <th style="text-align:right;">中位耗时</th>
+            <th style="text-align:right;">最大耗时</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for seg in batch.segments %}
+          <tr>
+            <td class="rank">{{ loop.index }}</td>
+            <td class="seg">
+              {{ seg.from_label }}<span class="arrow">→</span>{{ seg.to_label }}
+              <span class="sub">
+                身份键：by={{ seg.from_node.by_host or '—' }} ip={{ seg.from_node.ip or '—' }}
+                → by={{ seg.to_node.by_host or '—' }} ip={{ seg.to_node.ip or '—' }}
+              </span>
+            </td>
+            <td class="num">{{ seg.sample_count }}</td>
+            <td class="num">{{ seg.median_human }}</td>
+            <td class="num">{{ seg.max_human }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <p class="legend">
+        区段身份为上下游节点“规范化 <code>by</code> 主机名 + 对端 IP”的完整已知字段组合，
+        任一端 <code>by</code> 与 IP 都缺失的区段不合并；下表按中位耗时<strong>从慢到快</strong>排序。
+        同一封邮件中同键区段重复出现（如真实转发环路 / greylisting 重试）时，
+        仅取最大的有效非负耗时作为该邮件样本。
       </p>
     {% endif %}
   {% endif %}
@@ -366,6 +487,7 @@
 <script>
   const taA = document.getElementById('headers_a');
   const taB = document.getElementById('headers_b');
+  const taBatch = document.getElementById('headers_batch');
   document.getElementById('fillSample').addEventListener('click', () => {
     taA.value = {{ sample | tojson }};
     taB.value = {{ sample_b | tojson }};
@@ -374,6 +496,13 @@
     taA.value = '';
     taB.value = '';
     taA.focus();
+  });
+  document.getElementById('fillBatchSample').addEventListener('click', () => {
+    taBatch.value = {{ sample_batch | tojson }};
+  });
+  document.getElementById('clearBatch').addEventListener('click', () => {
+    taBatch.value = '';
+    taBatch.focus();
   });
 </script>
 </body>

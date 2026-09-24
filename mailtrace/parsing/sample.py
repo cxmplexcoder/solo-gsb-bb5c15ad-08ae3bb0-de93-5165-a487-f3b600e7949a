@@ -65,3 +65,86 @@ To: User <user@final.example>
 Subject: Delivery path demo
 """
 
+# 慢段归因示例：三封沿同一条投递链路转发的邮件，以明确分隔行分开。
+# - 各段耗时不同（演示样本数 / 中位耗时 / 最大耗时与从慢到快排序）；
+# - 第 3 封含一个无身份的内部处理段（两段邻接区段不合并）、
+#   一次时间倒灌（relay1 -> relay2，-5 秒）以及一次同键区段重复
+#   （greylisting 重试：smtp01 -> outgoing 出现两次，只取最大耗时）。
+_BATCH_MAIL_1 = """\
+Received: from mx1.final.example (mx1.final.example [198.51.100.10])
+\tby mailbox.final.example (Postfix) with ESMTPS id B1001
+\tfor <user@final.example>; Wed, 23 Sep 2026 02:02:12 +0000
+Received: from relay2.provider.example (relay2.provider.example [203.0.113.22])
+\tby mx1.final.example (Postfix) with ESMTP id B1002
+\tfor <user@final.example>; Wed, 23 Sep 2026 02:02:10 +0000
+Received: from relay1.provider.example (relay1.provider.example [203.0.113.11])
+\tby relay2.provider.example (Postfix) with ESMTP id B1003
+\tfor <user@final.example>; Wed, 23 Sep 2026 02:02:05 +0000
+Received: from outgoing.example.org (outgoing.example.org [192.0.2.50])
+\tby relay1.provider.example (Postfix) with ESMTP id B1004
+\tfor <user@final.example>; Wed, 23 Sep 2026 02:01:55 +0000
+Received: from smtp01.corp.example.net (smtp01.corp.example.net [10.10.0.5])
+\tby outgoing.example.org with ESMTP id B1005
+\tfor user@final.example; Wed, 23 Sep 2026 02:01:30 +0000
+Received: from [10.10.0.5] (helo=smtp01.corp.example.net)
+\tby smtp01.corp.example.net with ESMTP id B1006
+\tfor user@final.example; Wed, 23 Sep 2026 02:00:00 +0000
+"""
+
+_BATCH_MAIL_2 = """\
+Received: from mx1.final.example (mx1.final.example [198.51.100.10])
+\tby mailbox.final.example (Postfix) with ESMTPS id B2001
+\tfor <user@final.example>; Wed, 23 Sep 2026 03:02:14 +0000
+Received: from relay2.provider.example (relay2.provider.example [203.0.113.22])
+\tby mx1.final.example (Postfix) with ESMTP id B2002
+\tfor <user@final.example>; Wed, 23 Sep 2026 03:02:12 +0000
+Received: from relay1.provider.example (relay1.provider.example [203.0.113.11])
+\tby relay2.provider.example (Postfix) with ESMTP id B2003
+\tfor <user@final.example>; Wed, 23 Sep 2026 03:02:05 +0000
+Received: from outgoing.example.org (outgoing.example.org [192.0.2.50])
+\tby relay1.provider.example (Postfix) with ESMTP id B2004
+\tfor <user@final.example>; Wed, 23 Sep 2026 03:01:40 +0000
+Received: from smtp01.corp.example.net (smtp01.corp.example.net [10.10.0.5])
+\tby outgoing.example.org with ESMTP id B2005
+\tfor user@final.example; Wed, 23 Sep 2026 03:00:00 +0000
+"""
+
+_BATCH_MAIL_3 = """\
+Received: from mx1.final.example (mx1.final.example [198.51.100.10])
+\tby mailbox.final.example (Postfix) with ESMTPS id B3001
+\tfor <user@final.example>; Wed, 23 Sep 2026 04:02:06 +0000
+Received: from relay2.provider.example (relay2.provider.example [203.0.113.22])
+\tby mx1.final.example (Postfix) with ESMTP id B3002
+\tfor <user@final.example>; Wed, 23 Sep 2026 04:02:05 +0000
+Received: from relay1.provider.example (relay1.provider.example [203.0.113.11])
+\tby relay2.provider.example (Postfix) with ESMTP id B3003
+\tfor <user@final.example>; Wed, 23 Sep 2026 04:01:50 +0000
+Received: from outgoing.example.org (outgoing.example.org [192.0.2.50])
+\tby relay1.provider.example (Postfix) with ESMTP id B3004
+\tfor <user@final.example>; Wed, 23 Sep 2026 04:01:55 +0000
+Received: (queue scanning by content filter); Wed, 23 Sep 2026 04:01:30 +0000
+Received: from smtp01.corp.example.net (smtp01.corp.example.net [10.10.0.5])
+\tby outgoing.example.org with ESMTP id B3005
+\tfor user@final.example; Wed, 23 Sep 2026 04:01:20 +0000
+Received: from [10.10.0.5] (helo=smtp01.corp.example.net)
+\tby smtp01.corp.example.net with ESMTP id B3006
+\tfor user@final.example; Wed, 23 Sep 2026 04:00:10 +0000
+Received: from smtp01.corp.example.net (smtp01.corp.example.net [10.10.0.5])
+\tby outgoing.example.org with ESMTP id B3007
+\tfor user@final.example; Wed, 23 Sep 2026 04:00:08 +0000
+Received: from [10.10.0.5] (helo=smtp01.corp.example.net)
+\tby smtp01.corp.example.net with ESMTP id B3008
+\tfor user@final.example; Wed, 23 Sep 2026 04:00:00 +0000
+"""
+
+BATCH_SEPARATOR = "##### 下一封邮件 #####"
+
+SAMPLE_BATCH_HEADERS = (
+    "##### 邮件 1 / 3 #####\n"
+    + _BATCH_MAIL_1
+    + "\n##### 邮件 2 / 3 #####\n"
+    + _BATCH_MAIL_2
+    + "\n##### 邮件 3 / 3 #####\n"
+    + _BATCH_MAIL_3
+)
+

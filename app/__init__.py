@@ -6,8 +6,18 @@ import os
 
 from flask import Flask, jsonify, render_template, request
 
-from mailtrace.parsing import analyze_headers, compare_headers
-from mailtrace.parsing.sample import SAMPLE_HEADERS, SAMPLE_HEADERS_B
+from mailtrace.parsing import (
+    MIN_BATCH_EMAILS,
+    analyze_headers,
+    batch_delay_stats,
+    compare_headers,
+    split_headers_batch,
+)
+from mailtrace.parsing.sample import (
+    SAMPLE_BATCH_HEADERS,
+    SAMPLE_HEADERS,
+    SAMPLE_HEADERS_B,
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -26,11 +36,13 @@ def create_app() -> Flask:
     app.config["MAX_INPUT_BYTES"] = max_input_kb * 1024
     app.config["SAMPLE_HEADERS"] = SAMPLE_HEADERS
     app.config["SAMPLE_HEADERS_B"] = SAMPLE_HEADERS_B
+    app.config["SAMPLE_BATCH_HEADERS"] = SAMPLE_BATCH_HEADERS
 
     def render_index(**extra):
         context = {
             "sample": SAMPLE_HEADERS,
             "sample_b": SAMPLE_HEADERS_B,
+            "sample_batch": SAMPLE_BATCH_HEADERS,
             "max_input_kb": max_input_kb,
         }
         context.update(extra)
@@ -72,6 +84,23 @@ def create_app() -> Flask:
             }
         return compare_headers(headers_a, headers_b)
 
+    def _check_batch_size(raw_text: str) -> str | None:
+        max_bytes = app.config["MAX_INPUT_BYTES"]
+        if len(raw_text.encode("utf-8", errors="ignore")) > max_bytes:
+            return f"批量输入超过 {max_input_kb} KB 上限，请减少邮件份数后重试"
+        return None
+
+    def _do_batch(pieces: list[str]) -> dict:
+        if len(pieces) < MIN_BATCH_EMAILS:
+            return {
+                "error": (
+                    f"慢段归因至少需要 {MIN_BATCH_EMAILS} 份邮件头部，"
+                    f"当前仅识别到 {len(pieces)} 份；"
+                    "请用整行分隔符（如 ----- 或 ##### 下一封 #####）分开各邮件"
+                )
+            }
+        return batch_delay_stats(pieces)
+
     @app.post("/analyze")
     def analyze_form():
         raw_headers = request.form.get("headers_a", "") or request.form.get("headers", "")
@@ -91,6 +120,27 @@ def create_app() -> Flask:
             headers_a=headers_a,
             headers_b=headers_b,
             compare=compare,
+        )
+
+    @app.post("/batch-delays")
+    def batch_form():
+        raw_text = request.form.get("headers_batch", "")
+        size_error = _check_batch_size(raw_text)
+        if size_error:
+            batch = {"error": size_error}
+        elif not raw_text.strip():
+            batch = {
+                "error": "请先粘贴至少两份邮件原始头部，并用整行分隔符"
+                "（如 ----- 或 ##### 下一封 #####）分开"
+            }
+        else:
+            pieces = split_headers_batch(raw_text)
+            batch = _do_batch(pieces)
+        return render_index(
+            headers_a=request.form.get("headers_a", ""),
+            headers_b=request.form.get("headers_b", ""),
+            headers_batch=raw_text,
+            batch=batch,
         )
 
     @app.post("/api/analyze")
@@ -118,6 +168,46 @@ def create_app() -> Flask:
         if not isinstance(headers_a, str) or not isinstance(headers_b, str):
             return jsonify({"error": "headers_a 和 headers_b 必须是字符串"}), 400
         result = _do_compare(headers_a, headers_b)
+        status = 400 if result.get("error") else 200
+        return jsonify(result), status
+
+    @app.post("/api/batch-delays")
+    def batch_delays_api():
+        if request.is_json:
+            payload = request.get_json(silent=True) or {}
+            headers_list = payload.get("headers")
+            if headers_list is None:
+                # 也允许直接粘贴带分隔符的整段文本，由服务端切分
+                raw_text = payload.get("headers_text", "")
+                separator = payload.get("separator")
+                if not isinstance(raw_text, str) or not (
+                    isinstance(separator, str) or separator is None
+                ):
+                    return jsonify(
+                        {"error": "请以 headers 传字符串数组，"
+                                  "或以 headers_text 传带分隔符的字符串"}
+                    ), 400
+                if _check_batch_size(raw_text):
+                    return jsonify({"error": _check_batch_size(raw_text)}), 400
+                pieces = split_headers_batch(raw_text, separator)
+            else:
+                if not isinstance(headers_list, list) or not all(
+                    isinstance(item, str) for item in headers_list
+                ):
+                    return jsonify({"error": "headers 必须是字符串数组"}), 400
+                for index, item in enumerate(headers_list):
+                    if _check_batch_size(item):
+                        return jsonify(
+                            {"error": f"第 {index + 1} 份头部超过"
+                                      f" {max_input_kb} KB 上限"}
+                        ), 400
+                pieces = headers_list
+        else:
+            raw_text = request.form.get("headers_text", "")
+            separator = request.form.get("separator") or None
+            pieces = split_headers_batch(raw_text, separator)
+
+        result = _do_batch(pieces)
         status = 400 if result.get("error") else 200
         return jsonify(result), status
 
