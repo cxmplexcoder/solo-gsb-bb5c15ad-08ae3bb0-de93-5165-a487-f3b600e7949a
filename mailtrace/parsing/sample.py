@@ -65,3 +65,62 @@ To: User <user@final.example>
 Subject: Delivery path demo
 """
 
+
+# 多封慢段归因示例：三封走同一条 edge -> mid -> final 链路的邮件，
+# 用页面规范分隔符 BATCH_DELIMITER（===== 下一封邮件 =====）分开。
+# - 邮件 1：正常投递，mid->final 段耗时 150 秒；
+# - 邮件 2：edge->mid 耗时 600 秒（最慢段），mid->final 时间倒灌 -20 秒（排除）；
+# - 邮件 3：mid->final 段时间无效（排除）；退信后发件方从同一 IP 重新注入，
+#   edge->mid 同键区段在本封内出现两次（60 秒、150 秒），仅取最大有效
+#   非负耗时 150 秒作为该邮件样本；退信/重注入路径另有仅本封出现的
+#   mid->edge 回流段（60 秒）。
+SAMPLE_HEADERS_BATCH = """\
+Received: from mid.example (mid.example [198.51.100.20])
+\tby final.example with ESMTP id M1C
+\t; Tue, 23 Sep 2026 02:06:30 +0000
+Received: from edge.example (edge.example [198.51.100.10])
+\tby mid.example with ESMTP id M1B
+\t; Tue, 23 Sep 2026 02:04:00 +0000
+Received: from sender.example (sender.example [203.0.113.50])
+\tby edge.example with ESMTP id M1A
+\t; Tue, 23 Sep 2026 02:03:00 +0000
+Date: Tue, 23 Sep 2026 02:03:00 +0000
+From: sender@example.com
+To: user@final.example
+Subject: batch message 1
+===== 下一封邮件 =====
+Received: from mid.example (mid.example [198.51.100.20])
+\tby final.example with ESMTP id M2C
+\t; Tue, 23 Sep 2026 02:13:40 +0000
+Received: from edge.example (edge.example [198.51.100.10])
+\tby mid.example with ESMTP id M2B
+\t; Tue, 23 Sep 2026 02:14:00 +0000
+Received: from sender.example (sender.example [203.0.113.50])
+\tby edge.example with ESMTP id M2A
+\t; Tue, 23 Sep 2026 02:04:00 +0000
+Date: Tue, 23 Sep 2026 02:04:00 +0000
+From: sender@example.com
+To: user@final.example
+Subject: batch message 2
+===== 下一封邮件 =====
+Received: from mid.example (mid.example [198.51.100.20])
+\tby final.example with ESMTP id M3D
+\t; not-a-valid-date (clock lost on final)
+Received: from edge.example (edge.example [198.51.100.10])
+\tby mid.example with ESMTP id M3C
+\t; Tue, 23 Sep 2026 02:21:00 +0000
+Received: from sender.example (sender.example [203.0.113.50])
+\tby edge.example with ESMTP id M3B
+\t; Tue, 23 Sep 2026 02:18:30 +0000
+Received: from edge.example (edge.example [198.51.100.10])
+\tby mid.example with ESMTP id M3A2
+\t; Tue, 23 Sep 2026 02:17:30 +0000
+Received: from sender.example (sender.example [203.0.113.50])
+\tby edge.example with ESMTP id M3A
+\t; Tue, 23 Sep 2026 02:16:30 +0000
+Date: Tue, 23 Sep 2026 02:16:30 +0000
+From: sender@example.com
+To: user@final.example
+Subject: batch message 3
+"""
+

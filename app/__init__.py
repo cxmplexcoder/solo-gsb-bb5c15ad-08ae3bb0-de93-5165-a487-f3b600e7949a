@@ -6,8 +6,17 @@ import os
 
 from flask import Flask, jsonify, render_template, request
 
-from mailtrace.parsing import analyze_headers, compare_headers
-from mailtrace.parsing.sample import SAMPLE_HEADERS, SAMPLE_HEADERS_B
+from mailtrace.parsing import (
+    analyze_headers,
+    batch_delay_analysis,
+    compare_headers,
+    split_batch_headers,
+)
+from mailtrace.parsing.sample import (
+    SAMPLE_HEADERS,
+    SAMPLE_HEADERS_B,
+    SAMPLE_HEADERS_BATCH,
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -31,6 +40,7 @@ def create_app() -> Flask:
         context = {
             "sample": SAMPLE_HEADERS,
             "sample_b": SAMPLE_HEADERS_B,
+            "sample_batch": SAMPLE_HEADERS_BATCH,
             "max_input_kb": max_input_kb,
         }
         context.update(extra)
@@ -41,11 +51,11 @@ def create_app() -> Flask:
         return render_index()
 
     def _check_size(raw_headers: str, side: str | None = None) -> str | None:
-        """返回错误消息；未超限返回 None。side 用于对照场景的 “A 侧/B 侧” 提示。"""
+        """返回错误消息；未超限返回 None。side 为超限提示前缀（如 “A 侧”、“第 2 封”）。"""
         max_bytes = app.config["MAX_INPUT_BYTES"]
         if len(raw_headers.encode("utf-8", errors="ignore")) > max_bytes:
-            prefix = f"{side} 侧" if side else ""
-            return f"{prefix}输入超过 {max_input_kb} KB 上限，请截取头部后重试"
+            prefix = f"{side}输入" if side else "输入"
+            return f"{prefix}超过 {max_input_kb} KB 上限，请截取头部后重试"
         return None
 
     def _do_analyze(raw_headers: str) -> dict:
@@ -61,7 +71,7 @@ def create_app() -> Flask:
         return analyze_headers(raw_headers)
 
     def _do_compare(headers_a: str, headers_b: str) -> dict:
-        for side, raw in (("A", headers_a), ("B", headers_b)):
+        for side, raw in (("A 侧", headers_a), ("B 侧", headers_b)):
             error = _check_size(raw, side)
             if error:
                 return {"error": error}
@@ -71,6 +81,13 @@ def create_app() -> Flask:
                 "（各包含至少一个 Received 字段）"
             }
         return compare_headers(headers_a, headers_b)
+
+    def _do_batch_delays(headers_list: list[str]) -> dict:
+        for idx, raw in enumerate(headers_list, start=1):
+            error = _check_size(raw, f"第 {idx} 封")
+            if error:
+                return {"error": error}
+        return batch_delay_analysis(headers_list)
 
     @app.post("/analyze")
     def analyze_form():
@@ -92,6 +109,27 @@ def create_app() -> Flask:
             headers_b=headers_b,
             compare=compare,
         )
+
+    @app.post("/batch-delays")
+    def batch_delays_form():
+        raw_batch = request.form.get("headers_batch", "")
+        headers_list = split_batch_headers(raw_batch)
+        if not headers_list:
+            batch = {
+                "error": "未识别到任何邮件头部，请用分隔行（如 "
+                "“===== 下一封邮件 =====”）分开至少一份原始头部",
+                "message_count": 0,
+                "analyzed_count": 0,
+                "message_errors": [],
+                "segment_count": 0,
+                "sample_count": 0,
+                "excluded": {"invalid_time": 0, "backflow": 0, "identity_less": 0},
+                "duplicate_collapsed": 0,
+                "segments": [],
+            }
+        else:
+            batch = _do_batch_delays(headers_list)
+        return render_index(headers_batch=raw_batch, batch=batch)
 
     @app.post("/api/analyze")
     def analyze_api():
@@ -118,6 +156,28 @@ def create_app() -> Flask:
         if not isinstance(headers_a, str) or not isinstance(headers_b, str):
             return jsonify({"error": "headers_a 和 headers_b 必须是字符串"}), 400
         result = _do_compare(headers_a, headers_b)
+        status = 400 if result.get("error") else 200
+        return jsonify(result), status
+
+    @app.post("/api/batch-delays")
+    def batch_delays_api():
+        if not request.is_json:
+            return jsonify(
+                {"error": "请使用 application/json 提交 {\"headers\": [头部字符串, ...]}"}
+            ), 400
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "请求体必须是 JSON 对象，含 headers 字符串数组"}), 400
+        headers_list = payload.get("headers")
+        if not isinstance(headers_list, list) or not all(
+            isinstance(item, str) for item in headers_list
+        ):
+            return jsonify({"error": "headers 必须是字符串数组（每封邮件一个原始头部）"}), 400
+        if len(headers_list) < 2:
+            return jsonify({"error": "请至少提供两封邮件的原始头部"}), 400
+        if any(not item.strip() for item in headers_list):
+            return jsonify({"error": "headers 数组中存在空白项，请删除后重试"}), 400
+        result = _do_batch_delays(headers_list)
         status = 400 if result.get("error") else 200
         return jsonify(result), status
 

@@ -13,6 +13,12 @@
 - **双邮件头路径对照**：分别粘贴两份头部，复用同一套 Received 解析结果，
   按投递结构顺序对中继节点做**保序全局对齐**，并列展示**共有 / 新增（仅 B）/ 缺失（仅 A）**节点；
   共有节点展示两份各自的相邻耗时与差值（B−A），任一侧时间无效时明确显示“不可比较”。
+- **多封邮件慢段归因**：页面一次粘贴**至少三份**用分隔行分开的原始头部
+  （`===== 下一封邮件 =====`，也支持 `---`、`###`、`***` 等分隔行），
+  或调用 `POST /api/batch-delays`（`headers` 字符串数组），复用同一套
+  Received 解析，按各邮件投递顺序中**实际相邻的两个节点**聚合慢段，
+  输出每段的样本数、中位耗时、最大耗时（从慢到快排序），并统计
+  因时间无效 / 时间倒灌被排除的区段数。
 
 解析核心（`mailtrace/`）仅依赖 Python 标准库，可脱离 Flask 单独使用或被其他程序导入。
 
@@ -55,7 +61,25 @@ docker build -t mailtrace . && docker run --rm -p 8000:8000 mailtrace
 2. 把邮件的**原始头部**（Gmail 的“显示原始邮件”、Outlook 的“查看邮件来源”等）完整粘贴到
    **头部 A** 文本框（也可以点“填入示例”，会同时填入 A、B 两份示例）；
 3. 点击 **分析投递路径（A）** 查看单份头部的投递时间线；
-4. 或在 **头部 B** 中粘贴另一份头部，点击 **对照 A / B 路径** 查看双邮件头对照结果。
+4. 或在 **头部 B** 中粘贴另一份头部，点击 **对照 A / B 路径** 查看双邮件头对照结果；
+5. 需要在**多封邮件之间定位慢段**时，把至少三份原始头部粘贴到
+   **“多封邮件慢段归因”** 文本框，邮件之间单独一行写分隔符
+   `===== 下一封邮件 =====`（可点“填入 3 封示例”参考格式），
+   点击 **慢段归因（多封）**。
+
+慢段归因的聚合口径：
+
+- 聚合单位是每封邮件投递顺序中**实际相邻的两个节点**组成的有向区段（上游 → 下游），
+  不会跳过中间节点拼接耗时；
+- 节点身份是**规范化 `by` 主机名与对端 IP 的完整已知字段组合**：
+  主机名忽略大小写与末尾点，缺失字段保留为“未知”——因此 `(mx, 1.2.3.4)` 与
+  `(mx, 未知 IP)` 属于不同节点；区段任一端完全没有身份（by 与 IP 都缺失）时，
+  该区段会被计数但**不与其他邮件合并**；
+- 同一封邮件里同一区段重复出现（退信、重试、绕环）时，只把其中**最大的有效非负耗时**
+  作为该邮件在这一区段上的唯一样本（界面会显示归并掉的重复区段数）；
+- 相邻两跳任一时间缺失 / 无法解析 → 计入“时间无效”；
+  下游时间早于上游（负耗时，时间倒灌 / 时钟偏移）→ 计入“时间倒灌”，两者均不进入统计；
+- 每个区段输出 **样本数、中位耗时、最大耗时**，整体按中位耗时**从慢到快**排序。
 
 单份分析页面以时间线形式展示每个中继节点：节点名称、UTC 时间、from/by/协议、对端 IP、
 距上一节点耗时、异常/告警，以及可展开的**原始 `Received` 文本（保留折行）**。
@@ -95,6 +119,56 @@ curl -s -X POST http://localhost:8000/api/compare \
 {"error": "B 侧头部中未找到 Received 字段，无法进行路径对照",
  "side_errors": {"b": "B 侧头部中未找到 Received 字段"}}
 ```
+
+多封邮件慢段归因（接收 `headers` **字符串数组**，至少两项；每封邮件的完整
+原始头部作为一个数组元素，分隔符切分在页面端完成）：
+
+```bash
+curl -s -X POST http://localhost:8000/api/batch-delays \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "headers": [
+          "Received: by mid.example ...; ...\nReceived: by edge.example ...; ...",
+          "Received: by mid.example ...; ...\nReceived: by edge.example ...; ...",
+          "Received: by mid.example ...; ...\nReceived: by edge.example ...; ..."
+        ]
+      }'
+```
+
+返回结果（节选）：
+
+```json
+{
+  "message_count": 3,
+  "analyzed_count": 3,
+  "message_errors": [],
+  "segment_count": 2,
+  "sample_count": 4,
+  "excluded": {"invalid_time": 1, "backflow": 1, "identity_less": 0},
+  "duplicate_collapsed": 0,
+  "segments": [
+    {
+      "rank": 1,
+      "from": {"node": "edge.example", "by_host": "edge.example", "ip": "203.0.113.50"},
+      "to":   {"node": "mid.example",  "by_host": "mid.example",  "ip": "198.51.100.10"},
+      "sample_count": 3,
+      "median_seconds": 150.0, "median_human": "2 分 30 秒",
+      "max_seconds": 600.0,    "max_human": "10 分 0 秒"
+    }
+  ]
+}
+```
+
+- `segments` 已按**中位耗时从慢到快**排序；`from` / `to` 分别是该相邻区段的上游、
+  下游节点（`ip` 为该节点在其上游 `Received` 中记录的对端 IP，可能为 `null`）；
+- `excluded.invalid_time` = 因本节点或上游时间缺失 / 无法解析而排除的区段数，
+  `excluded.backflow` = 因负耗时（时间倒灌）而排除的区段数，
+  `excluded.identity_less` = 任一端无 by/IP 身份、未参与合并的区段数；
+- `duplicate_collapsed` = 同一封邮件内同键区段重复出现、按“取最大有效非负耗时”
+  归并掉的额外出现次数；
+- 某封邮件没有 `Received` 字段时记入 `message_errors`（含其在数组中的序号），
+  其余邮件继续分析；所有邮件都没有 `Received`、数组少于两项、元素不是字符串
+  或存在空白项时返回 400。
 
 健康检查：`GET http://localhost:8000/healthz`。
 
@@ -172,15 +246,17 @@ python -m unittest discover -s tests -v
 │   └── parsing/
 │       ├── parser.py       # 折行展开、时间解析、路径排序、耗时与异常
 │       ├── compare.py      # 双邮件头对照：保序全局对齐、耗时差值
-│       └── sample.py       # 页面“填入示例”数据（A / B 两份）
+│       ├── batch.py        # 多封慢段归因：相邻节点对聚合、中位/最大耗时、排除计数
+│       └── sample.py       # 页面“填入示例”数据（A / B 两份及多封批量三份）
 ├── wsgi.py                 # gunicorn / flask 启动入口
 ├── entrypoint.sh           # 容器启动时安装依赖并启动 gunicorn
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-└── tests/                  # 解析核心与对照单元测试
+└── tests/                  # 解析核心、对照与慢段归因单元测试
     ├── test_parser.py
-    └── test_compare.py
+    ├── test_compare.py
+    └── test_batch.py
 ```
 
 ## 安全与隐私

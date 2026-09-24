@@ -167,6 +167,46 @@
   .diff-ok { color: var(--ok); font-weight: 700; }
   .diff-na { color: var(--muted); }
   .time-bad { color: var(--error); }
+
+  /* 多封慢段归因 */
+  table.seg {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden;
+  }
+  table.seg th, table.seg td {
+    padding: 9px 12px; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--line);
+  }
+  table.seg thead th {
+    background: var(--panel-2); color: var(--muted);
+    font-size: 12.5px; white-space: nowrap;
+  }
+  table.seg tbody tr:last-child td { border-bottom: 0; }
+  table.seg td.node { font-weight: 600; word-break: break-all; }
+  table.seg td .sub { display: block; font-weight: 400; }
+  .rank {
+    display: inline-block; min-width: 26px; text-align: center;
+    background: var(--warn); color: #422006; font-weight: 700;
+    border-radius: 999px; padding: 1px 8px; font-size: 12.5px;
+  }
+  .rank.fast { background: var(--panel-2); color: var(--muted); }
+  .arrow { color: var(--muted); font-weight: 700; padding: 0 6px; }
+  .seg-slow { color: var(--warn); font-weight: 700; white-space: nowrap; }
+  .seg-max { color: var(--text); white-space: nowrap; }
+  .msgerr-list { list-style: none; padding: 0; margin: 8px 0 0; }
+  .msgerr-list li {
+    border-radius: 8px; padding: 7px 12px; margin-top: 6px;
+    font-size: 13px; background: #3b1d24; color: #fecdd3;
+    border: 1px solid #7f1d1d;
+  }
+  .excluded-pills { display: flex; gap: 10px; flex-wrap: wrap; margin: 4px 0 16px; }
+  .pill {
+    border: 1px solid var(--line); background: var(--panel-2);
+    border-radius: 999px; padding: 4px 14px; font-size: 13px;
+  }
+  .pill strong { color: var(--warn); }
+  .section-title { margin: 36px 0 12px; font-size: 18px; }
 </style>
 </head>
 <body>
@@ -192,6 +232,101 @@
       <span class="hint" style="align-self:center;">单侧输入上限 {{ max_input_kb }} KB（MAX_INPUT_KB）</span>
     </div>
   </form>
+
+  <h2 class="section-title">📊 多封邮件慢段归因（至少 3 封）</h2>
+  <p class="subtitle" style="margin-bottom:10px;">
+    在下面粘贴多封邮件的原始头部，每两封之间单独一行写分隔符
+    （<code>===== 下一封邮件 =====</code>，也可用 <code>---</code>、<code>###</code>、<code>***</code>
+    等至少 3 个重复符号的分隔行）。系统按每封邮件投递顺序中<strong>实际相邻的两个节点</strong>聚合，
+    输出各慢段的样本数、中位耗时、最大耗时（从慢到快），并统计因时间无效或时间倒灌被排除的区段数。
+  </p>
+  <form method="post" action="/batch-delays" id="batchForm">
+    <textarea name="headers_batch" id="headers_batch" style="min-height:260px;"
+      placeholder="第 1 封邮件完整原始头部……&#10;===== 下一封邮件 =====&#10;第 2 封邮件完整原始头部……&#10;===== 下一封邮件 =====&#10;第 3 封邮件完整原始头部……">{{ headers_batch or '' }}</textarea>
+    <div class="toolbar">
+      <button class="btn-primary" type="submit">慢段归因（多封）</button>
+      <button class="btn-ghost" type="button" id="fillBatchSample">填入 3 封示例</button>
+      <button class="btn-ghost" type="button" id="clearBatch">清空</button>
+    </div>
+  </form>
+
+  {% if batch %}
+    {% if batch.error %}
+      <div class="banner">{{ batch.error }}</div>
+    {% else %}
+      <h2 style="font-size:18px;">慢段归因结果（按中位耗时从慢到快）</h2>
+      <div class="stats">
+        <div class="stat"><div class="num">{{ batch.analyzed_count }} / {{ batch.message_count }}</div><div class="label">有效分析邮件 / 提交邮件</div></div>
+        <div class="stat"><div class="num">{{ batch.segment_count }}</div><div class="label">慢段（相邻节点对）</div></div>
+        <div class="stat"><div class="num">{{ batch.sample_count }}</div><div class="label">有效耗时样本</div></div>
+        <div class="stat"><div class="num warn">{{ batch.excluded.invalid_time }}</div><div class="label">排除：时间无效</div></div>
+        <div class="stat"><div class="num error">{{ batch.excluded.backflow }}</div><div class="label">排除：时间倒灌</div></div>
+        <div class="stat"><div class="num">{{ batch.excluded.identity_less }}</div><div class="label">未合并：区段缺身份</div></div>
+      </div>
+
+      {% if batch.duplicate_collapsed %}
+      <div class="excluded-pills">
+        <span class="pill">同封邮件重复同键区段已归并：<strong>{{ batch.duplicate_collapsed }}</strong> 个（每封每段仅取最大有效非负耗时）</span>
+      </div>
+      {% endif %}
+
+      {% if batch.message_errors %}
+      <div class="card">
+        <h2>未参与分析的邮件</h2>
+        <ul class="msgerr-list">
+          {% for me in batch.message_errors %}
+          <li>第 {{ me.index }} 封：{{ me.error }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      {% if batch.segments %}
+      <div class="cmp-wrap">
+      <table class="seg">
+        <thead>
+          <tr>
+            <th>排名</th>
+            <th>慢段（上游 → 下游）</th>
+            <th>样本数</th>
+            <th>中位耗时</th>
+            <th>最大耗时</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for seg in batch.segments %}
+          <tr>
+            <td><span class="rank {% if loop.index > 3 %}fast{% endif %}">{{ seg.rank }}</span></td>
+            <td>
+              <span class="node">{{ seg.from.node }}
+                {% if seg.from.ip %}<span class="sub hint">对端 IP：{{ seg.from.ip }}</span>{% endif %}
+              </span>
+              <span class="arrow">→</span>
+              <span class="node">{{ seg.to.node }}
+                {% if seg.to.ip %}<span class="sub hint">对端 IP：{{ seg.to.ip }}</span>{% endif %}
+              </span>
+            </td>
+            <td>{{ seg.sample_count }}</td>
+            <td class="seg-slow">{{ seg.median_human }}</td>
+            <td class="seg-max">{{ seg.max_human }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% else %}
+      <div class="banner">没有可归因的有效慢段（所有相邻区段均被排除，或缺少可识别身份的节点）。</div>
+      {% endif %}
+
+      <p class="legend">
+        归因口径：每个区段是某封邮件投递顺序中<strong>实际相邻</strong>的两个节点，不跨节点拼接耗时；
+        节点身份为规范化 <code>by</code> 主机名与对端 IP 的<strong>完整已知字段组合</strong>
+        （by 或 IP 缺失即视为不同身份；任一端完全无身份的区段列出但不与其他邮件合并）。
+        同一封邮件中同一区段重复出现时仅取最大的有效非负耗时；时间无法解析或缺失记为“时间无效”，
+        下游时间早于上游（倒灌）记为“时间倒灌”，均不进入样本统计。
+      </p>
+    {% endif %}
+  {% endif %}
 
   {% if compare %}
     {% if compare.error %}
@@ -374,6 +509,15 @@
     taA.value = '';
     taB.value = '';
     taA.focus();
+  });
+
+  const taBatch = document.getElementById('headers_batch');
+  document.getElementById('fillBatchSample').addEventListener('click', () => {
+    taBatch.value = {{ sample_batch | tojson }};
+  });
+  document.getElementById('clearBatch').addEventListener('click', () => {
+    taBatch.value = '';
+    taBatch.focus();
   });
 </script>
 </body>
